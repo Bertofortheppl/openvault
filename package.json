@@ -1,0 +1,15 @@
+{
+  "name": "openvault",
+  "version": "0.1.0",
+  "description": "OpenCode as an Obsidian sidebar AI collaborator",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "obsidian": "^1.7.0",
+    "typescript": "^5.7.0"
+  }
+}

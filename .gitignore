@@ -1,0 +1,6 @@
+node_modules/
+main.js
+main.js.map
+*.hot-update.*
+*.tmp.*
+data.json

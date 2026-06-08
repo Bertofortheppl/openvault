@@ -1,0 +1,95 @@
+.openvault-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px;
+}
+
+.openvault-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 8px;
+}
+
+.openvault-header h3 {
+  margin: 0;
+}
+
+.openvault-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--background-modifier-hover);
+}
+
+.openvault-messages {
+  flex: 1;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.openvault-message {
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.openvault-user {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  margin-left: 24px;
+}
+
+.openvault-assistant {
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  margin-right: 24px;
+}
+
+.openvault-hint {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 24px;
+  font-style: italic;
+}
+
+.openvault-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.openvault-input {
+  flex: 1;
+  resize: none;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 14px;
+}
+
+.openvault-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.openvault-send {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.openvault-send:hover {
+  opacity: 0.9;
+}
