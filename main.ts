@@ -1,5 +1,6 @@
 import { Plugin, ItemView, WorkspaceLeaf, PluginSettingTab, App, Setting, Notice } from 'obsidian';
 import http from 'http';
+import { spawn, ChildProcess } from 'child_process';
 
 const OPENVAULT_VIEW = 'openvault-chat-view';
 const DEFAULT_PORT = 4097;
@@ -7,17 +8,23 @@ const DEFAULT_PORT = 4097;
 interface OpenVaultSettings {
   port: number;
   openrouterApiKey: string;
+  autoStart: boolean;
+  opencodePath: string;
 }
 
 const DEFAULT_SETTINGS: OpenVaultSettings = {
   port: DEFAULT_PORT,
   openrouterApiKey: '',
+  autoStart: false,
+  opencodePath: '/home/berto/.opencode/bin/opencode',
 };
 
 export default class OpenVaultPlugin extends Plugin {
   settings: OpenVaultSettings;
   serverReady = false;
   private healthPollTimer: number | null = null;
+  private serverProcess: ChildProcess | null = null;
+  private serverStartAttempted = false;
 
   async onload() {
     await this.loadSettings();
@@ -36,13 +43,16 @@ export default class OpenVaultPlugin extends Plugin {
 
     this.addSettingTab(new OpenVaultSettingsTab(this.app, this));
 
-    // Background health poll every 15s. Plugin never spawns a server —
-    // you run `opencode serve --port 4097` in a terminal, plugin connects.
+    if (this.settings.autoStart && this.settings.openrouterApiKey) {
+      this.startServer();
+    }
+
     this.startHealthPoll();
   }
 
   onunload() {
     this.stopHealthPoll();
+    this.stopServer();
   }
 
   async activateView() {
@@ -69,6 +79,53 @@ export default class OpenVaultPlugin extends Plugin {
     this.app.workspace.getLeavesOfType(OPENVAULT_VIEW).forEach(leaf => {
       (leaf.view as ChatView).refreshStatus?.();
     });
+  }
+
+  private startServer() {
+    if (this.serverProcess) return;
+    this.serverStartAttempted = true;
+
+    const vaultPath = (this.app.vault.adapter as any).getBasePath?.() ?? '';
+    if (!vaultPath) {
+      new Notice('OpenVault: could not determine vault path');
+      return;
+    }
+
+    const env = { ...process.env };
+    if (this.settings.openrouterApiKey) {
+      env.OPENROUTER_API_KEY = this.settings.openrouterApiKey;
+    }
+
+    const proc = spawn(this.settings.opencodePath, ['serve', '--port', String(this.settings.port)], {
+      cwd: vaultPath,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    proc.on('error', (err) => {
+      new Notice(`OpenVault: server start failed - ${err.message}`);
+      this.serverProcess = null;
+    });
+
+    proc.on('exit', (code) => {
+      if (code !== 0 && this.serverProcess !== null) {
+        console.log(`OpenVault server exited with code ${code}`);
+      }
+      this.serverProcess = null;
+    });
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      console.log('[OpenVault stderr]', data.toString());
+    });
+
+    this.serverProcess = proc;
+  }
+
+  private stopServer() {
+    if (this.serverProcess) {
+      this.serverProcess.kill('SIGTERM');
+      this.serverProcess = null;
+    }
   }
 
   private startHealthPoll() {
@@ -369,6 +426,36 @@ class OpenVaultSettingsTab extends PluginSettingTab {
           .setValue(this.plugin.settings.openrouterApiKey)
           .onChange(async (value) => {
             this.plugin.settings.openrouterApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Auto-start server')
+      .setDesc('Start opencode serve automatically when Obsidian opens this vault.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoStart)
+          .onChange(async (value) => {
+            this.plugin.settings.autoStart = value;
+            await this.plugin.saveSettings();
+            if (value && this.plugin.settings.openrouterApiKey) {
+              this.plugin.startServer();
+            } else if (!value) {
+              this.plugin.stopServer();
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('opencode path')
+      .setDesc('Path to the opencode binary.')
+      .addText((text) =>
+        text
+          .setPlaceholder('/home/berto/.opencode/bin/opencode')
+          .setValue(this.plugin.settings.opencodePath)
+          .onChange(async (value) => {
+            this.plugin.settings.opencodePath = value.trim();
             await this.plugin.saveSettings();
           })
       );
