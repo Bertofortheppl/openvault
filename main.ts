@@ -263,6 +263,10 @@ class ChatView extends ItemView {
     const port = this.plugin.settings.port;
 
     try {
+      // Cancel previous SSE listener to avoid stale connections duplicating deltas
+      this.eventReader?.cancel();
+      this.eventReader = null;
+
       // Create session on first message
       if (!this.activeSessionId) {
         const res = await this.plugin.httpRequest(
