@@ -278,24 +278,70 @@ class ChatView extends ItemView {
         this.activeSessionId = session.id;
       }
 
-      // Render assistant bubble with streaming cursor
-      const assistantEl = this.addMessage('assistant', '▍');
+      // Assistant bubble — text span + animated indicator (cursor or thinking dots)
+      const assistantEl = this.addMessage('assistant', '');
+      const textSpan = assistantEl.createEl('span');
+      const indicatorEl = assistantEl.createEl('span', { cls: 'openvault-indicator' });
+      // Start with thinking animation
+      indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
+      indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
+      indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
+      this.messagesEl.scrollTo(0, this.messagesEl.scrollHeight);
+
       let accumulatedText = '';
+      let hasReceivedContent = false;
+      let pauseTimer: number | null = null;
+
+      const showCursor = () => {
+        indicatorEl.empty();
+        indicatorEl.setText('▍');
+      };
+
+      const showThinking = () => {
+        indicatorEl.empty();
+        indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
+        indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
+        indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
+      };
+
+      const resetPauseTimer = () => {
+        if (pauseTimer !== null) {
+          clearTimeout(pauseTimer);
+        }
+        pauseTimer = window.setTimeout(() => {
+          // No deltas for 1.5s — show thinking dots to indicate still working
+          showThinking();
+        }, 1500);
+      };
 
       // Open SSE stream BEFORE sending the prompt — events are push, not pull
       const streamDone = this.listenForResponse(
         this.activeSessionId,
         (delta: string) => {
+          if (!hasReceivedContent) {
+            hasReceivedContent = true;
+          }
           accumulatedText += delta;
-          assistantEl.setText(accumulatedText + '▍');
+          textSpan.setText(accumulatedText);
+          showCursor();
           this.messagesEl.scrollTo(0, this.messagesEl.scrollHeight);
+          resetPauseTimer();
         },
         () => {
-          assistantEl.setText(accumulatedText || '(empty response)');
+          // Streaming done — render with clickable wiki-links
+          if (pauseTimer !== null) clearTimeout(pauseTimer);
+          assistantEl.empty();
+          if (accumulatedText) {
+            this.renderMessage(assistantEl, accumulatedText);
+          } else {
+            assistantEl.setText('(empty response)');
+          }
           this.setInputEnabled(true);
           this.inputEl.focus();
         },
         (errMsg: string) => {
+          if (pauseTimer !== null) clearTimeout(pauseTimer);
+          assistantEl.empty();
           assistantEl.setText(`Error: ${errMsg}`);
           this.setInputEnabled(true);
         }
@@ -388,9 +434,71 @@ class ChatView extends ItemView {
 
   private addMessage(role: string, text: string): HTMLElement {
     const el = this.messagesEl.createEl('div', { cls: `openvault-message openvault-${role}` });
-    el.setText(text);
+    if (text && role === 'user') {
+      this.renderMessage(el, text);
+    } else {
+      el.setText(text);
+    }
     this.messagesEl.scrollTo(0, this.messagesEl.scrollHeight);
     return el;
+  }
+
+  // Render text with clickable [[wiki-links]] and markdown-style links
+  private renderMessage(el: HTMLElement, text: string) {
+    const pattern = /\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)]+)\)/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = pattern.exec(text)) !== null) {
+      // Text before this match
+      if (match.index > lastIndex) {
+        el.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+      }
+
+      if (match[1]) {
+        // [[wiki-link]]
+        const linkTarget = match[1];
+        const a = el.createEl('a', {
+          cls: 'internal-link',
+          text: linkTarget,
+          href: linkTarget,
+        });
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.app.workspace.openLinkText(linkTarget, '', false)
+            .catch(() => {
+              new Notice(`Could not open "${linkTarget}"`);
+            });
+        });
+      } else if (match[2] && match[3]) {
+        // [label](url)
+        const label = match[2];
+        const url = match[3];
+        const a = el.createEl('a', {
+          cls: 'external-link',
+          text: label,
+          href: url,
+        });
+        if (url.startsWith('obsidian://') || url.endsWith('.md')) {
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.app.workspace.openLinkText(url, '', false)
+              .catch(() => new Notice(`Could not open "${url}"`));
+          });
+        } else {
+          a.setAttr('target', '_blank');
+        }
+      }
+
+      lastIndex = pattern.lastIndex;
+    }
+
+    // Remaining text after last match
+    if (lastIndex < text.length) {
+      el.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
   }
 }
 
