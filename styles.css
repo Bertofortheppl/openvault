@@ -130,3 +130,112 @@
   text-decoration: none;
   border-bottom-style: solid;
 }
+
+/* Footer row below input */
+.openvault-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  margin-top: 4px;
+}
+
+/* Mode toggle badge */
+.openvault-mode-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.openvault-mode-badge.build {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.openvault-mode-badge.plan {
+  background: #e67e22;
+  color: #fff;
+}
+
+.openvault-mode-badge:hover {
+  opacity: 0.85;
+}
+
+/* Skill chip indicator */
+.openvault-skill-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+}
+
+.openvault-skill-chip.hidden {
+  display: none;
+}
+
+.openvault-skill-label {
+  flex: 1;
+}
+
+.openvault-skill-clear {
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  color: var(--text-muted);
+}
+
+.openvault-skill-clear:hover {
+  color: var(--text-normal);
+}
+
+/* Skill slash-command menu */
+.openvault-skill-menu {
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  margin-bottom: 4px;
+}
+
+.openvault-skill-menu.hidden {
+  display: none;
+}
+
+.openvault-skill-item {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.openvault-skill-item:last-child {
+  border-bottom: none;
+}
+
+.openvault-skill-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.openvault-skill-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.openvault-skill-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}

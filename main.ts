@@ -12,6 +12,14 @@ interface OpenVaultSettings {
   opencodePath: string;
 }
 
+interface SkillInfo {
+  name: string;
+  description: string;
+  slash: boolean;
+  location: string;
+  content: string;
+}
+
 const DEFAULT_SETTINGS: OpenVaultSettings = {
   port: DEFAULT_PORT,
   openrouterApiKey: '',
@@ -183,6 +191,13 @@ class ChatView extends ItemView {
   activeSessionId: string | null = null;
   private eventReader: { cancel: () => void } | null = null;
   private statusEl: HTMLElement | null = null;
+  private currentMode: 'build' | 'plan' = 'build';
+  private modeBadgeEl: HTMLElement | null = null;
+  private skills: SkillInfo[] = [];
+  private skillsFetched = false;
+  private activeSkill: SkillInfo | null = null;
+  private skillMenuEl: HTMLElement | null = null;
+  private skillChipEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: OpenVaultPlugin) {
     super(leaf);
@@ -210,6 +225,10 @@ class ChatView extends ItemView {
 
     this.messagesEl = container.createEl('div', { cls: 'openvault-messages' });
 
+    this.skillMenuEl = container.createEl('div', { cls: 'openvault-skill-menu hidden' });
+
+    this.skillChipEl = container.createEl('div', { cls: 'openvault-skill-chip hidden' });
+
     const inputRow = container.createEl('div', { cls: 'openvault-input-row' });
     this.inputEl = inputRow.createEl('textarea', {
       cls: 'openvault-input',
@@ -220,12 +239,34 @@ class ChatView extends ItemView {
       text: 'Send',
     }) as HTMLButtonElement;
 
-    this.sendBtn.addEventListener('click', () => this.sendMessage());
+    const footerEl = container.createEl('div', { cls: 'openvault-footer' });
+    this.modeBadgeEl = footerEl.createEl('span', {
+      cls: 'openvault-mode-badge build',
+      text: 'Build',
+    });
+    this.modeBadgeEl.addEventListener('click', () => this.toggleMode());
+
+    this.inputEl.addEventListener('input', () => this.onInputChange());
     this.inputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        if (this.skillMenuEl && !this.skillMenuEl.classList.contains('hidden')) {
+          e.preventDefault();
+          const visible = this.getFilteredSkills();
+          if (visible.length > 0) {
+            this.selectSkill(visible[0]);
+          }
+          return;
+        }
         e.preventDefault();
         this.sendMessage();
       }
+      if (e.key === 'Escape' && this.skillMenuEl && !this.skillMenuEl.classList.contains('hidden')) {
+        e.preventDefault();
+        this.hideSkillMenu();
+      }
+    });
+    this.inputEl.addEventListener('blur', () => {
+      setTimeout(() => this.hideSkillMenu(), 200);
     });
   }
 
@@ -240,6 +281,123 @@ class ChatView extends ItemView {
     const ready = this.plugin.serverReady;
     this.statusEl.className = `openvault-status ${ready ? 'connected' : 'disconnected'}`;
     this.statusEl.setText(ready ? '● connected' : '○ disconnected');
+    if (ready && !this.skillsFetched) {
+      this.fetchSkills();
+    }
+  }
+
+  private toggleMode() {
+    this.currentMode = this.currentMode === 'build' ? 'plan' : 'build';
+    this.updateModeIndicator();
+  }
+
+  private updateModeIndicator() {
+    if (!this.modeBadgeEl) return;
+    const isBuild = this.currentMode === 'build';
+    this.modeBadgeEl.className = `openvault-mode-badge ${isBuild ? 'build' : 'plan'}`;
+    this.modeBadgeEl.setText(isBuild ? 'Build' : 'Plan');
+  }
+
+  private async fetchSkills() {
+    try {
+      const res = await this.plugin.httpRequest(
+        `http://127.0.0.1:${this.plugin.settings.port}/skill`
+      );
+      if (res.status === 200) {
+        this.skills = JSON.parse(res.body);
+      }
+    } catch {
+      this.skills = [];
+    }
+    this.skillsFetched = true;
+  }
+
+  private getFilteredSkills(): SkillInfo[] {
+    if (!this.skillMenuEl) return [];
+    const filterText = this.inputEl.value.slice(1).toLowerCase();
+    const filtered = this.skills.filter(s => {
+      if (s.slash === false) return false;
+      return s.name.toLowerCase().includes(filterText) ||
+        (s.description && s.description.toLowerCase().includes(filterText));
+    });
+    return filtered;
+  }
+
+  private showSkillMenu() {
+    if (!this.skillMenuEl) return;
+    if (!this.skillsFetched && this.plugin.serverReady) {
+      this.fetchSkills().then(() => {
+        if (this.inputEl.value.startsWith('/')) {
+          this.renderSkillMenu();
+        }
+      });
+      return;
+    }
+    this.renderSkillMenu();
+  }
+
+  private renderSkillMenu() {
+    const filtered = this.getFilteredSkills();
+    this.skillMenuEl.empty();
+    if (filtered.length === 0) {
+      this.skillMenuEl.classList.add('hidden');
+      return;
+    }
+    for (const skill of filtered) {
+      const item = this.skillMenuEl.createEl('div', { cls: 'openvault-skill-item' });
+      item.createEl('span', { cls: 'openvault-skill-name', text: skill.name });
+      if (skill.description) {
+        item.createEl('span', { cls: 'openvault-skill-desc', text: skill.description });
+      }
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        this.selectSkill(skill);
+      });
+    }
+    this.skillMenuEl.classList.remove('hidden');
+  }
+
+  private hideSkillMenu() {
+    if (!this.skillMenuEl) return;
+    this.skillMenuEl.classList.add('hidden');
+  }
+
+  private selectSkill(skill: SkillInfo) {
+    this.activeSkill = skill;
+    this.hideSkillMenu();
+    this.inputEl.value = '';
+    if (this.skillChipEl) {
+      this.skillChipEl.empty();
+      this.skillChipEl.classList.remove('hidden');
+      const label = this.skillChipEl.createEl('span', {
+        cls: 'openvault-skill-label',
+        text: `Skill: ${skill.name}`,
+      });
+      const closeBtn = this.skillChipEl.createEl('span', {
+        cls: 'openvault-skill-clear',
+        text: '×',
+      });
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.clearActiveSkill();
+      });
+    }
+  }
+
+  private clearActiveSkill() {
+    this.activeSkill = null;
+    if (this.skillChipEl) {
+      this.skillChipEl.classList.add('hidden');
+    }
+  }
+
+  private onInputChange() {
+    const val = this.inputEl.value;
+    if (val.startsWith('/') && val.length > 0) {
+      this.showSkillMenu();
+    } else if (this.skillMenuEl && !this.skillMenuEl.classList.contains('hidden')) {
+      this.hideSkillMenu();
+    }
   }
 
   private setInputEnabled(enabled: boolean) {
@@ -347,11 +505,24 @@ class ChatView extends ItemView {
         }
       );
 
+      // Build prompt body with mode and active skill
+      const promptBody: any = { parts: [{ type: 'text', text }] };
+      const systemParts: string[] = [];
+      if (this.currentMode === 'plan') {
+        systemParts.push('You are in plan mode. Do not execute any commands, write code, or make changes. Only analyze, discuss, and plan.');
+      }
+      if (this.activeSkill) {
+        systemParts.push(this.activeSkill.content);
+      }
+      if (systemParts.length > 0) {
+        promptBody.system = systemParts.join('\n\n');
+      }
+
       // Fire the prompt — returns 204, response streams via SSE above
       const promptRes = await this.plugin.httpRequest(
         `http://127.0.0.1:${port}/session/${this.activeSessionId}/prompt_async`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' } },
-        JSON.stringify({ parts: [{ type: 'text', text }] })
+        JSON.stringify(promptBody)
       );
       if (promptRes.status !== 204) {
         let msg = `prompt_async failed: ${promptRes.status}`;
