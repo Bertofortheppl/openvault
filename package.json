@@ -4,6 +4,7 @@
   "description": "OpenCode as an Obsidian sidebar AI collaborator",
   "main": "main.js",
   "scripts": {
+    "prepare": "lefthook install",
     "build": "node esbuild.config.mjs",
     "build:prod": "node esbuild.config.mjs --production",
     "dev": "node esbuild.config.mjs --watch",
@@ -13,6 +14,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "esbuild": "^0.25.0",
+    "lefthook": "^2.2.2",
     "obsidian": "^1.7.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.7"

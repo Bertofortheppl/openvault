@@ -24,7 +24,7 @@ export class OpenVaultSettingsTab extends PluginSettingTab {
       .setDesc('Absolute path to opencode. Leave empty to auto-detect.')
       .addText((text) =>
         text
-          .setPlaceholder('/home/berto/.opencode/bin/opencode')
+          .setPlaceholder('~/.opencode/bin/opencode')
           .setValue(this.host.settings.opencodePath)
           .onChange(async (value) => {
             this.host.settings.opencodePath = value.trim();

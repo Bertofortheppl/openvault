@@ -1,0 +1,14 @@
+pre-commit:
+  commands:
+    gitleaks:
+      run: gitleaks git --pre-commit --redact --staged --verbose
+
+pre-push:
+  parallel: true
+  commands:
+    typecheck:
+      run: npm run typecheck
+    tests:
+      run: npx vitest run
+    build:
+      run: npm run build:prod
