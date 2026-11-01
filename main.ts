@@ -1,752 +1,238 @@
-import { Plugin, ItemView, WorkspaceLeaf, PluginSettingTab, App, Setting, Notice } from 'obsidian';
-import http from 'http';
-import { spawn, ChildProcess } from 'child_process';
+import { FileSystemAdapter, Notice, Plugin, type WorkspaceLeaf } from 'obsidian';
+import type { V2Event } from '@opencode-ai/sdk/v2/client';
+import { createClient, statusOf, type OpencodeClient } from './src/client';
+import { ChatSession } from './src/session';
+import { OpenCodeServer } from './src/server';
+import { OpenVaultSettingsTab } from './src/settings';
+import {
+  DEFAULT_SETTINGS,
+  type OpenVaultSettings,
+  type PersistedData,
+  type ServerStatus,
+} from './src/types';
+import { OpenVaultView, VIEW_TYPE } from './src/view';
 
-const OPENVAULT_VIEW = 'openvault-chat-view';
-const DEFAULT_PORT = 4097;
-
-interface OpenVaultSettings {
-  port: number;
-  openrouterApiKey: string;
-  autoStart: boolean;
-  opencodePath: string;
-}
-
-interface SkillInfo {
-  name: string;
-  description: string;
-  slash: boolean;
-  location: string;
-  content: string;
-}
-
-const DEFAULT_SETTINGS: OpenVaultSettings = {
-  port: DEFAULT_PORT,
-  openrouterApiKey: '',
-  autoStart: false,
-  opencodePath: '/home/berto/.opencode/bin/opencode',
-};
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 export default class OpenVaultPlugin extends Plugin {
-  settings: OpenVaultSettings;
-  serverReady = false;
-  private healthPollTimer: number | null = null;
-  private serverProcess: ChildProcess | null = null;
-  private serverStartAttempted = false;
+  settings: OpenVaultSettings = { ...DEFAULT_SETTINGS };
+  session!: ChatSession;
+  client: OpencodeClient | null = null;
+  status: ServerStatus = { state: 'stopped' };
+  server = new OpenCodeServer();
 
-  async onload() {
+  private eventAbort: AbortController | null = null;
+  private connectPromise: Promise<void> | null = null;
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  get vaultPath(): string {
+    const adapter = this.app.vault.adapter;
+    return adapter instanceof FileSystemAdapter
+      ? adapter.getBasePath()
+      : process.cwd();
+  }
+
+  override async onload(): Promise<void> {
     await this.loadSettings();
+    this.session = new ChatSession(null, this.vaultPath);
+    this.session.sessionId = this.storedSessionId;
 
-    this.registerView(OPENVAULT_VIEW, (leaf) => new ChatView(leaf, this));
-
-    this.addRibbonIcon('message-square', 'OpenVault', () => {
-      this.activateView();
+    this.server.onStatus((status) => {
+      this.status = status;
+      this.refreshViews();
     });
 
+    this.registerView(
+      VIEW_TYPE,
+      (leaf: WorkspaceLeaf) => new OpenVaultView(leaf, this),
+    );
+    this.addRibbonIcon('message-square', 'OpenVault', () => void this.openView());
     this.addCommand({
-      id: 'open-openvault',
+      id: 'openvault-open',
       name: 'Open OpenVault chat',
-      callback: () => this.activateView(),
+      callback: () => void this.openView(),
     });
-
+    this.addCommand({
+      id: 'openvault-new-conversation',
+      name: 'OpenVault: new conversation',
+      callback: () => void this.createConversation(),
+    });
+    this.addCommand({
+      id: 'openvault-reconnect',
+      name: 'OpenVault: reconnect',
+      callback: () => void this.connect(),
+    });
     this.addSettingTab(new OpenVaultSettingsTab(this.app, this));
 
-    if (this.settings.autoStart && this.settings.openrouterApiKey) {
-      this.startServer();
+    if (this.settings.autoStart) {
+      this.app.workspace.onLayoutReady(() => void this.connect());
     }
-
-    this.startHealthPoll();
   }
 
-  onunload() {
-    this.stopHealthPoll();
-    this.stopServer();
+  override onunload(): void {
+    this.disposeEvents();
+    this.server.stop();
   }
 
-  async activateView() {
-    const existing = this.app.workspace.getLeavesOfType(OPENVAULT_VIEW);
-    if (existing.length > 0) {
-      this.app.workspace.revealLeaf(existing[0]);
+  async openView(): Promise<void> {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    if (leaves.length > 0) {
+      await this.app.workspace.revealLeaf(leaves[0]);
       return;
     }
-    await this.app.workspace.getRightLeaf(false).setViewState({
-      type: OPENVAULT_VIEW,
-      active: true,
-    });
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
   }
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-  }
-
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
-
-  refreshChatViews() {
-    this.app.workspace.getLeavesOfType(OPENVAULT_VIEW).forEach(leaf => {
-      (leaf.view as ChatView).refreshStatus?.();
-    });
-  }
-
-  private startServer() {
-    if (this.serverProcess) return;
-    this.serverStartAttempted = true;
-
-    const vaultPath = (this.app.vault.adapter as any).getBasePath?.() ?? '';
-    if (!vaultPath) {
-      new Notice('OpenVault: could not determine vault path');
-      return;
-    }
-
-    const env = { ...process.env };
-    if (this.settings.openrouterApiKey) {
-      env.OPENROUTER_API_KEY = this.settings.openrouterApiKey;
-    }
-
-    const proc = spawn(this.settings.opencodePath, ['serve', '--port', String(this.settings.port)], {
-      cwd: vaultPath,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    proc.on('error', (err) => {
-      new Notice(`OpenVault: server start failed - ${err.message}`);
-      this.serverProcess = null;
-    });
-
-    proc.on('exit', (code) => {
-      if (code !== 0 && this.serverProcess !== null) {
-        console.log(`OpenVault server exited with code ${code}`);
-      }
-      this.serverProcess = null;
-    });
-
-    proc.stderr?.on('data', (data: Buffer) => {
-      console.log('[OpenVault stderr]', data.toString());
-    });
-
-    this.serverProcess = proc;
-  }
-
-  private stopServer() {
-    if (this.serverProcess) {
-      this.serverProcess.kill('SIGTERM');
-      this.serverProcess = null;
+  async createConversation(): Promise<void> {
+    await this.openView();
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (leaf?.view instanceof OpenVaultView) {
+      await leaf.view.newConversation();
     }
   }
 
-  private startHealthPoll() {
-    this.stopHealthPoll();
-    this.healthPollTimer = window.setInterval(async () => {
-      const up = await this.checkHealth();
-      if (up && !this.serverReady) {
-        this.serverReady = true;
-        new Notice('OpenVault: connected');
-        this.refreshChatViews();
-      } else if (!up && this.serverReady) {
-        this.serverReady = false;
-        this.refreshChatViews();
-      }
-    }, 10000);
-  }
-
-  private stopHealthPoll() {
-    if (this.healthPollTimer !== null) {
-      clearInterval(this.healthPollTimer);
-      this.healthPollTimer = null;
-    }
-  }
-
-  private httpRequest(url: string, options?: http.RequestOptions, body?: string): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
-    return new Promise((resolve, reject) => {
-      const req = http.request(url, { method: 'GET', ...options }, (res) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data, headers: res.headers }));
-      });
-      req.on('error', reject);
-      if (body) req.write(body);
-      req.end();
-    });
-  }
-
-  async checkHealth(): Promise<boolean> {
-    try {
-      const res = await this.httpRequest(`http://127.0.0.1:${this.settings.port}/global/health`);
-      return res.status === 200;
-    } catch {
-      return false;
-    }
-  }
-}
-
-// ── Chat view ────────────────────────────────────────────────────────────────
-
-class ChatView extends ItemView {
-  plugin: OpenVaultPlugin;
-  messagesEl: HTMLElement;
-  inputEl: HTMLTextAreaElement;
-  sendBtn: HTMLButtonElement;
-  activeSessionId: string | null = null;
-  private eventReader: { cancel: () => void } | null = null;
-  private statusEl: HTMLElement | null = null;
-  private currentMode: 'build' | 'plan' = 'build';
-  private modeBadgeEl: HTMLElement | null = null;
-  private skills: SkillInfo[] = [];
-  private skillsFetched = false;
-  private activeSkill: SkillInfo | null = null;
-  private skillMenuEl: HTMLElement | null = null;
-  private skillChipEl: HTMLElement | null = null;
-
-  constructor(leaf: WorkspaceLeaf, plugin: OpenVaultPlugin) {
-    super(leaf);
-    this.plugin = plugin;
-  }
-
-  getViewType() { return OPENVAULT_VIEW; }
-  getDisplayText() { return 'OpenVault'; }
-  getIcon() { return 'message-square'; }
-
-  async onOpen() {
-    const container = this.containerEl.children[1] as HTMLElement;
-    container.empty();
-    container.addClass('openvault-container');
-
-    const header = container.createEl('div', { cls: 'openvault-header' });
-    header.createEl('span', { cls: 'openvault-title', text: 'OpenVault' });
-
-    // Store reference so we can update it as server state changes
-    this.statusEl = header.createEl('span', {
-      cls: 'openvault-status disconnected',
-      text: '○ disconnected',
-    });
-    this.refreshStatus();
-
-    this.messagesEl = container.createEl('div', { cls: 'openvault-messages' });
-
-    this.skillMenuEl = container.createEl('div', { cls: 'openvault-skill-menu hidden' });
-
-    this.skillChipEl = container.createEl('div', { cls: 'openvault-skill-chip hidden' });
-
-    const inputRow = container.createEl('div', { cls: 'openvault-input-row' });
-    this.inputEl = inputRow.createEl('textarea', {
-      cls: 'openvault-input',
-      attr: { placeholder: 'Ask opencode...', rows: '3' },
-    });
-    this.sendBtn = inputRow.createEl('button', {
-      cls: 'openvault-send',
-      text: 'Send',
-    }) as HTMLButtonElement;
-
-    const footerEl = container.createEl('div', { cls: 'openvault-footer' });
-    this.modeBadgeEl = footerEl.createEl('span', {
-      cls: 'openvault-mode-badge build',
-      text: 'Build',
-    });
-    this.modeBadgeEl.addEventListener('click', () => this.toggleMode());
-
-    this.inputEl.addEventListener('input', () => this.onInputChange());
-    this.inputEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        if (this.skillMenuEl && !this.skillMenuEl.classList.contains('hidden')) {
-          e.preventDefault();
-          const visible = this.getFilteredSkills();
-          if (visible.length > 0) {
-            this.selectSkill(visible[0]);
-          }
-          return;
-        }
-        e.preventDefault();
-        this.sendMessage();
-      }
-      if (e.key === 'Escape' && this.skillMenuEl && !this.skillMenuEl.classList.contains('hidden')) {
-        e.preventDefault();
-        this.hideSkillMenu();
-      }
-    });
-    this.inputEl.addEventListener('blur', () => {
-      setTimeout(() => this.hideSkillMenu(), 200);
-    });
-  }
-
-  async onClose() {
-    this.eventReader?.cancel();
-    this.eventReader = null;
-  }
-
-  // Update the status indicator to reflect current plugin.serverReady state
-  refreshStatus() {
-    if (!this.statusEl) return;
-    const ready = this.plugin.serverReady;
-    this.statusEl.className = `openvault-status ${ready ? 'connected' : 'disconnected'}`;
-    this.statusEl.setText(ready ? '● connected' : '○ disconnected');
-    if (ready && !this.skillsFetched) {
-      this.fetchSkills();
-    }
-  }
-
-  private toggleMode() {
-    this.currentMode = this.currentMode === 'build' ? 'plan' : 'build';
-    this.updateModeIndicator();
-  }
-
-  private updateModeIndicator() {
-    if (!this.modeBadgeEl) return;
-    const isBuild = this.currentMode === 'build';
-    this.modeBadgeEl.className = `openvault-mode-badge ${isBuild ? 'build' : 'plan'}`;
-    this.modeBadgeEl.setText(isBuild ? 'Build' : 'Plan');
-  }
-
-  private async fetchSkills() {
-    try {
-      const res = await this.plugin.httpRequest(
-        `http://127.0.0.1:${this.plugin.settings.port}/skill`
-      );
-      if (res.status === 200) {
-        this.skills = JSON.parse(res.body);
-      }
-    } catch {
-      this.skills = [];
-    }
-    this.skillsFetched = true;
-  }
-
-  private getFilteredSkills(): SkillInfo[] {
-    if (!this.skillMenuEl) return [];
-    const filterText = this.inputEl.value.slice(1).toLowerCase();
-    const filtered = this.skills.filter(s => {
-      if (s.slash === false) return false;
-      return s.name.toLowerCase().includes(filterText) ||
-        (s.description && s.description.toLowerCase().includes(filterText));
-    });
-    return filtered;
-  }
-
-  private showSkillMenu() {
-    if (!this.skillMenuEl) return;
-    if (!this.skillsFetched && this.plugin.serverReady) {
-      this.fetchSkills().then(() => {
-        if (this.inputEl.value.startsWith('/')) {
-          this.renderSkillMenu();
-        }
-      });
-      return;
-    }
-    this.renderSkillMenu();
-  }
-
-  private renderSkillMenu() {
-    const filtered = this.getFilteredSkills();
-    this.skillMenuEl.empty();
-    if (filtered.length === 0) {
-      this.skillMenuEl.classList.add('hidden');
-      return;
-    }
-    for (const skill of filtered) {
-      const item = this.skillMenuEl.createEl('div', { cls: 'openvault-skill-item' });
-      item.createEl('span', { cls: 'openvault-skill-name', text: skill.name });
-      if (skill.description) {
-        item.createEl('span', { cls: 'openvault-skill-desc', text: skill.description });
-      }
-      item.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        this.selectSkill(skill);
+  connect(): Promise<void> {
+    if (!this.connectPromise) {
+      this.connectPromise = this.doConnect().finally(() => {
+        this.connectPromise = null;
       });
     }
-    this.skillMenuEl.classList.remove('hidden');
+    return this.connectPromise;
   }
 
-  private hideSkillMenu() {
-    if (!this.skillMenuEl) return;
-    this.skillMenuEl.classList.add('hidden');
-  }
-
-  private selectSkill(skill: SkillInfo) {
-    this.activeSkill = skill;
-    this.hideSkillMenu();
-    this.inputEl.value = '';
-    if (this.skillChipEl) {
-      this.skillChipEl.empty();
-      this.skillChipEl.classList.remove('hidden');
-      const label = this.skillChipEl.createEl('span', {
-        cls: 'openvault-skill-label',
-        text: `Skill: ${skill.name}`,
-      });
-      const closeBtn = this.skillChipEl.createEl('span', {
-        cls: 'openvault-skill-clear',
-        text: '×',
-      });
-      closeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.clearActiveSkill();
-      });
-    }
-  }
-
-  private clearActiveSkill() {
-    this.activeSkill = null;
-    if (this.skillChipEl) {
-      this.skillChipEl.classList.add('hidden');
-    }
-  }
-
-  private onInputChange() {
-    const val = this.inputEl.value;
-    if (val.startsWith('/') && val.length > 0) {
-      this.showSkillMenu();
-    } else if (this.skillMenuEl && !this.skillMenuEl.classList.contains('hidden')) {
-      this.hideSkillMenu();
-    }
-  }
-
-  private setInputEnabled(enabled: boolean) {
-    this.inputEl.disabled = !enabled;
-    this.sendBtn.disabled = !enabled;
-  }
-
-  async sendMessage() {
-    const text = this.inputEl.value.trim();
-    if (!text) return;
-
-    if (!this.plugin.serverReady) {
-      new Notice('OpenVault: server not connected. Start it in your terminal and wait 10s.');
-      return;
-    }
-
-    this.setInputEnabled(false);
-    this.inputEl.value = '';
-    this.addMessage('user', text);
-
-    const port = this.plugin.settings.port;
+  private async doConnect(): Promise<void> {
+    this.disposeEvents();
+    this.client = null;
+    this.session.setClient(null);
+    this.server.stop();
 
     try {
-      // Cancel previous SSE listener to avoid stale connections duplicating deltas
-      this.eventReader?.cancel();
-      this.eventReader = null;
-
-      // Create session on first message
-      if (!this.activeSessionId) {
-        const res = await this.plugin.httpRequest(
-          `http://127.0.0.1:${port}/session`,
-          { method: 'POST' }
-        );
-        if (res.status !== 200) throw new Error(`Session create failed: ${res.status}`);
-        const session = JSON.parse(res.body);
-        this.activeSessionId = session.id;
-      }
-
-      // Assistant bubble — text span + animated indicator (cursor or thinking dots)
-      const assistantEl = this.addMessage('assistant', '');
-      const textSpan = assistantEl.createEl('span');
-      const indicatorEl = assistantEl.createEl('span', { cls: 'openvault-indicator' });
-      // Start with thinking animation
-      indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
-      indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
-      indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
-      this.messagesEl.scrollTo(0, this.messagesEl.scrollHeight);
-
-      let accumulatedText = '';
-      let hasReceivedContent = false;
-      let pauseTimer: number | null = null;
-
-      const showCursor = () => {
-        indicatorEl.empty();
-        indicatorEl.setText('▍');
-      };
-
-      const showThinking = () => {
-        indicatorEl.empty();
-        indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
-        indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
-        indicatorEl.createEl('span', { cls: 'openvault-thinking-dot' });
-      };
-
-      const resetPauseTimer = () => {
-        if (pauseTimer !== null) {
-          clearTimeout(pauseTimer);
-        }
-        pauseTimer = window.setTimeout(() => {
-          // No deltas for 1.5s — show thinking dots to indicate still working
-          showThinking();
-        }, 1500);
-      };
-
-      // Open SSE stream BEFORE sending the prompt — events are push, not pull
-      const streamDone = this.listenForResponse(
-        this.activeSessionId,
-        (delta: string) => {
-          if (!hasReceivedContent) {
-            hasReceivedContent = true;
-          }
-          accumulatedText += delta;
-          textSpan.setText(accumulatedText);
-          showCursor();
-          this.messagesEl.scrollTo(0, this.messagesEl.scrollHeight);
-          resetPauseTimer();
-        },
-        () => {
-          // Streaming done — render with clickable wiki-links
-          if (pauseTimer !== null) clearTimeout(pauseTimer);
-          assistantEl.empty();
-          if (accumulatedText) {
-            this.renderMessage(assistantEl, accumulatedText);
-          } else {
-            assistantEl.setText('(empty response)');
-          }
-          this.setInputEnabled(true);
-          this.inputEl.focus();
-        },
-        (errMsg: string) => {
-          if (pauseTimer !== null) clearTimeout(pauseTimer);
-          assistantEl.empty();
-          assistantEl.setText(`Error: ${errMsg}`);
-          this.setInputEnabled(true);
-        }
+      await this.server.start(this.settings.opencodePath, this.vaultPath);
+    } catch (error) {
+      new Notice(
+        `OpenVault: ${error instanceof Error ? error.message : String(error)}`,
       );
-
-      // Build prompt body with mode and active skill
-      const promptBody: any = { parts: [{ type: 'text', text }] };
-      const systemParts: string[] = [];
-      if (this.currentMode === 'plan') {
-        systemParts.push('You are in plan mode. Do not execute any commands, write code, or make changes. Only analyze, discuss, and plan.');
-      }
-      if (this.activeSkill) {
-        systemParts.push(this.activeSkill.content);
-      }
-      if (systemParts.length > 0) {
-        promptBody.system = systemParts.join('\n\n');
-      }
-
-      // Fire the prompt — returns 204, response streams via SSE above
-      const promptRes = await this.plugin.httpRequest(
-        `http://127.0.0.1:${port}/session/${this.activeSessionId}/prompt_async`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
-        JSON.stringify(promptBody)
-      );
-      if (promptRes.status !== 204) {
-        let msg = `prompt_async failed: ${promptRes.status}`;
-        try { const b = JSON.parse(promptRes.body); msg = b?.data?.message ?? msg; } catch {}
-        throw new Error(msg);
-      }
-
-      await streamDone;
-    } catch (err: any) {
-      this.addMessage('assistant', `Error: ${err.message}`);
-      this.setInputEnabled(true);
+      return;
     }
+
+    const client = createClient(this.server.baseUrl);
+    this.client = client;
+    this.session.setClient(client);
+    this.startEvents(client);
+
+    const existing = this.session.sessionId;
+    if (existing) {
+      try {
+        const check = await client.v2.session.get({ sessionID: existing });
+        if (statusOf(check) === 404) {
+          this.session.reset();
+          await this.saveSessionState(null);
+        }
+      } catch {
+        // Keep the stored session and let history report the problem.
+      }
+    }
+    this.refreshViews();
   }
 
-  // Subscribe to /global/event SSE bus using Node http module
-  private listenForResponse(
-    sessionId: string,
-    onDelta: (delta: string) => void,
-    onDone: () => void,
-    onError: (msg: string) => void,
+  private startEvents(client: OpencodeClient): void {
+    this.disposeEvents();
+    const controller = new AbortController();
+    this.eventAbort = controller;
+    void this.runEvents(client, controller.signal);
+  }
+
+  private async runEvents(
+    client: OpencodeClient,
+    signal: AbortSignal,
   ): Promise<void> {
-    return new Promise((resolve) => {
-      const port = this.plugin.settings.port;
-      let aborted = false;
-
-      const finish = (errMsg?: string) => {
-        if (aborted) return;
-        aborted = true;
-        if (errMsg) onError(errMsg);
-        else onDone();
-        resolve();
-      };
-
-      const req = http.get(`http://127.0.0.1:${port}/global/event`, (res) => {
-        if (res.statusCode !== 200) {
-          finish('SSE connect failed');
-          return;
-        }
-
-        let buffer = '';
-        res.on('data', (chunk: Buffer) => {
-          buffer += chunk.toString();
-          const lines = buffer.split('\n');
-          buffer = lines.pop() ?? '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            try {
-              const event = JSON.parse(line.slice(6));
-              const p = event.payload ?? event;
-              const info = p.properties ?? {};
-              if (info.sessionID && info.sessionID !== sessionId) continue;
-
-              if (p.type === 'message.part.delta' && info.field === 'text') {
-                onDelta(info.delta ?? '');
-              } else if (p.type === 'message.part.delta' && info.field === 'reasoning') {
-                // reasoning chunks — skip
-              } else if (p.type === 'session.idle') {
-                finish();
-                return;
-              } else if (p.type === 'session.error') {
-                const msg = info.error?.message ?? info.error?.data?.message ?? 'session error';
-                finish(msg);
-                return;
-              }
-            } catch { /* skip malformed lines */ }
-          }
+    while (!signal.aborted) {
+      try {
+        const { stream } = await client.v2.event.subscribe({
+          signal,
+          sseMaxRetryAttempts: 1,
         });
+        for await (const event of stream) {
+          if (signal.aborted) break;
+          this.dispatch(event as V2Event);
+        }
+      } catch (error) {
+        if (!signal.aborted) {
+          console.warn('[OpenVault] event stream error', error);
+        }
+      }
+      if (!signal.aborted) await sleep(1000);
+    }
+  }
 
-        res.on('end', () => finish());
-        res.on('error', (err) => finish(err.message));
+  private dispatch(event: V2Event): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view instanceof OpenVaultView) leaf.view.handleEvent(event);
+    }
+  }
+
+  private disposeEvents(): void {
+    this.eventAbort?.abort();
+    this.eventAbort = null;
+  }
+
+  private refreshViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view instanceof OpenVaultView) {
+        leaf.view.refreshStatus(this.status);
+      }
+    }
+  }
+
+  async loadSettings(): Promise<void> {
+    const raw = (await this.loadData()) as
+      | (PersistedData & Record<string, unknown>)
+      | null;
+    this.settings = { ...DEFAULT_SETTINGS, ...(raw?.settings ?? {}) };
+
+    if (raw && !raw.settings) {
+      if (typeof raw.opencodePath === 'string') {
+        this.settings.opencodePath = raw.opencodePath;
+      }
+      if (typeof raw.autoStart === 'boolean') {
+        this.settings.autoStart = raw.autoStart;
+      }
+      if (typeof raw.injectContext === 'boolean') {
+        this.settings.injectContext = raw.injectContext;
+      }
+    }
+
+    this.storedSessionId =
+      typeof raw?.state?.sessionId === 'string' ? raw.state.sessionId : null;
+  }
+
+  async saveSettings(): Promise<void> {
+    await this.persist();
+  }
+
+  async saveSessionState(sessionId: string | null): Promise<void> {
+    if (this.session) this.session.sessionId = sessionId;
+    await this.persist();
+  }
+
+  private storedSessionId: string | null = null;
+
+  private persist(): Promise<void> {
+    const data: PersistedData = {
+      settings: this.settings,
+      state: { sessionId: this.session?.sessionId ?? null },
+    };
+    this.writeQueue = this.writeQueue
+      .catch(() => undefined)
+      .then(() => this.saveData(data))
+      .catch((error: unknown) => {
+        console.error('[OpenVault] could not save settings', error);
+        new Notice('OpenVault: could not save settings');
       });
-
-      req.on('error', (err) => finish(err.message));
-
-      // Allow cancel from outside
-      this.eventReader = { cancel: () => { req.destroy(); finish(); } } as any;
-    });
-  }
-
-  private addMessage(role: string, text: string): HTMLElement {
-    const el = this.messagesEl.createEl('div', { cls: `openvault-message openvault-${role}` });
-    if (text && role === 'user') {
-      this.renderMessage(el, text);
-    } else {
-      el.setText(text);
-    }
-    this.messagesEl.scrollTo(0, this.messagesEl.scrollHeight);
-    return el;
-  }
-
-  // Render text with clickable [[wiki-links]] and markdown-style links
-  private renderMessage(el: HTMLElement, text: string) {
-    const pattern = /\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)]+)\)/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = pattern.exec(text)) !== null) {
-      // Text before this match
-      if (match.index > lastIndex) {
-        el.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
-      }
-
-      if (match[1]) {
-        // [[wiki-link]]
-        const linkTarget = match[1];
-        const a = el.createEl('a', {
-          cls: 'internal-link',
-          text: linkTarget,
-          href: linkTarget,
-        });
-        a.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          this.app.workspace.openLinkText(linkTarget, '', false)
-            .catch(() => {
-              new Notice(`Could not open "${linkTarget}"`);
-            });
-        });
-      } else if (match[2] && match[3]) {
-        // [label](url)
-        const label = match[2];
-        const url = match[3];
-        const a = el.createEl('a', {
-          cls: 'external-link',
-          text: label,
-          href: url,
-        });
-        if (url.startsWith('obsidian://') || url.endsWith('.md')) {
-          a.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            this.app.workspace.openLinkText(url, '', false)
-              .catch(() => new Notice(`Could not open "${url}"`));
-          });
-        } else {
-          a.setAttr('target', '_blank');
-        }
-      }
-
-      lastIndex = pattern.lastIndex;
-    }
-
-    // Remaining text after last match
-    if (lastIndex < text.length) {
-      el.appendChild(document.createTextNode(text.slice(lastIndex)));
-    }
-  }
-}
-
-// ── Settings tab ─────────────────────────────────────────────────────────────
-
-class OpenVaultSettingsTab extends PluginSettingTab {
-  plugin: OpenVaultPlugin;
-
-  constructor(app: App, plugin: OpenVaultPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-
-    new Setting(containerEl)
-      .setName('Server port')
-      .setDesc('Port the opencode server is running on.')
-      .addText((text) =>
-        text
-          .setPlaceholder(String(DEFAULT_PORT))
-          .setValue(String(this.plugin.settings.port))
-          .onChange(async (value) => {
-            this.plugin.settings.port = parseInt(value) || DEFAULT_PORT;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('OpenRouter API key')
-      .setDesc('API key used by opencode.')
-      .addText((text) =>
-        text
-          .setPlaceholder('sk-or-v1-...')
-          .setValue(this.plugin.settings.openrouterApiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.openrouterApiKey = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Auto-start server')
-      .setDesc('Start opencode serve automatically when Obsidian opens this vault.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.autoStart)
-          .onChange(async (value) => {
-            this.plugin.settings.autoStart = value;
-            await this.plugin.saveSettings();
-            if (value && this.plugin.settings.openrouterApiKey) {
-              this.plugin.startServer();
-            } else if (!value) {
-              this.plugin.stopServer();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('opencode path')
-      .setDesc('Path to the opencode binary.')
-      .addText((text) =>
-        text
-          .setPlaceholder('/home/berto/.opencode/bin/opencode')
-          .setValue(this.plugin.settings.opencodePath)
-          .onChange(async (value) => {
-            this.plugin.settings.opencodePath = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Server status')
-      .setDesc(this.plugin.serverReady
-        ? 'Connected to opencode on port ' + this.plugin.settings.port
-        : 'Not connected. Run opencode serve --port ' + this.plugin.settings.port + ' in a terminal.')
+    return this.writeQueue;
   }
 }

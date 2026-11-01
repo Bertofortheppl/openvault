@@ -19,7 +19,9 @@ const ctx = await esbuild.context({
 
 if (watch) {
   await ctx.watch();
+  console.log('esbuild: watching for changes');
 } else {
   await ctx.rebuild();
-  if (!prod) ctx.dispose();
+  await ctx.dispose();
+  console.log(prod ? 'esbuild: production build written to main.js' : 'esbuild: build written to main.js');
 }
