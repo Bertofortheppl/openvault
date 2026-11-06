@@ -1,5 +1,9 @@
-import type { PermissionV2Asked, V2Event } from '@opencode-ai/sdk/v2/client';
-import type { PermissionRequest } from './types';
+import type {
+  PermissionV2Asked,
+  QuestionV2Asked,
+  V2Event,
+} from '@opencode-ai/sdk/v2/client';
+import type { PermissionRequest, QuestionRequest } from './types';
 
 export interface TurnResult {
   text: string;
@@ -11,6 +15,7 @@ export interface TurnCallbacks {
   onText?: (text: string) => void;
   onStatus?: (status: string) => void;
   onPermission?: (permission: PermissionRequest) => void;
+  onQuestion?: (question: QuestionRequest) => void;
   onSettled?: (result: TurnResult) => void;
 }
 
@@ -37,6 +42,7 @@ export class TurnReducer {
   private aborted = false;
   private error: string | undefined;
   private permission: PermissionRequest | undefined;
+  private question: QuestionRequest | undefined;
   private tool: string | undefined;
 
   constructor(
@@ -55,6 +61,7 @@ export class TurnReducer {
     this.aborted = false;
     this.error = undefined;
     this.permission = undefined;
+    this.question = undefined;
     this.tool = undefined;
   }
 
@@ -64,6 +71,10 @@ export class TurnReducer {
 
   get pendingPermission(): PermissionRequest | undefined {
     return this.permission;
+  }
+
+  get pendingQuestion(): QuestionRequest | undefined {
+    return this.question;
   }
 
   get text(): string {
@@ -135,6 +146,22 @@ export class TurnReducer {
         this.permission = undefined;
         break;
       }
+      case 'question.v2.asked': {
+        const data = event.data as QuestionV2Asked['data'];
+        this.question = {
+          id: data.id,
+          questions: data.questions,
+        };
+        this.callbacks.onStatus?.('Waiting for your answer...');
+        this.callbacks.onQuestion?.(this.question);
+        break;
+      }
+      case 'question.v2.replied':
+      case 'question.v2.rejected': {
+        this.question = undefined;
+        this.callbacks.onStatus?.('');
+        break;
+      }
       case 'session.error': {
         const data = event.data as { error?: { name?: string } };
         if (data.error?.name === 'MessageAbortedError') {
@@ -147,11 +174,11 @@ export class TurnReducer {
       }
       case 'session.status': {
         const data = event.data as { status?: { type?: string } };
-        if (data.status?.type === 'idle') this.settle();
+        if (data.status?.type === 'idle' && !this.question) this.settle();
         break;
       }
       case 'session.idle': {
-        this.settle();
+        if (!this.question) this.settle();
         break;
       }
       default:
@@ -163,6 +190,7 @@ export class TurnReducer {
     if (this.finished) return;
     this.finished = true;
     this.active = false;
+    this.question = undefined;
     if (this.tool) {
       this.tool = undefined;
       this.callbacks.onStatus?.('');

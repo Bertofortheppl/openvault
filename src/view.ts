@@ -8,6 +8,7 @@ import type {
   AgentMode,
   ChatMessage,
   PermissionRequest,
+  QuestionRequest,
   ServerStatus,
 } from './types';
 import { uid } from './types';
@@ -41,6 +42,7 @@ export class OpenVaultView extends ItemView {
   private reducer: TurnReducer | null = null;
   private bubble: StreamBubble | null = null;
   private permissionEl: HTMLElement | null = null;
+  private questionEl: HTMLElement | null = null;
   private streaming = false;
   private historyLoaded = false;
   private raf = 0;
@@ -129,6 +131,7 @@ export class OpenVaultView extends ItemView {
     this.messages = [];
     this.historyLoaded = true;
     this.permissionEl = null;
+    this.questionEl = null;
     this.messagesEl.empty();
     this.updateComposer();
     this.inputEl.focus();
@@ -389,6 +392,7 @@ export class OpenVaultView extends ItemView {
         onText: (value) => this.handleText(value),
         onStatus: (value) => this.handleStatus(value),
         onPermission: (request) => this.renderPermission(request),
+        onQuestion: (request) => this.renderQuestion(request),
         onSettled: (result) => this.handleSettled(result),
       };
       const reducer = new TurnReducer(sessionId, callbacks);
@@ -464,6 +468,8 @@ export class OpenVaultView extends ItemView {
     this.stopTimer = null;
     this.permissionEl?.remove();
     this.permissionEl = null;
+    this.questionEl?.remove();
+    this.questionEl = null;
 
     const bubble = this.bubble;
     if (bubble) {
@@ -544,6 +550,159 @@ export class OpenVaultView extends ItemView {
     actions.createEl('button', { cls: 'ov-btn ov-btn--danger', text: 'Reject' })
       .addEventListener('click', () => void reply('reject'));
 
+    this.scrollBottom(false);
+  }
+
+  private renderQuestion(request: QuestionRequest): void {
+    this.questionEl?.remove();
+    const card = this.messagesEl.createEl('div', { cls: 'ov-question' });
+    this.questionEl = card;
+
+    const selections = request.questions.map(() => new Set<string>());
+    const customs = request.questions.map(() => '');
+    const optionContainers: HTMLElement[] = [];
+    let submit: HTMLButtonElement | null = null;
+
+    const isAnswered = (index: number): boolean =>
+      selections[index].size > 0 ||
+      (request.questions[index].custom === true &&
+        customs[index].trim().length > 0);
+
+    const sync = (): void => {
+      optionContainers.forEach((container, index) => {
+        container
+          .querySelectorAll<HTMLElement>('.ov-question-option')
+          .forEach((item) =>
+            item.toggleClass(
+              'is-selected',
+              selections[index].has(item.dataset.label ?? ''),
+            ),
+          );
+      });
+      if (submit) {
+        submit.disabled = !request.questions.every((_, index) =>
+          isAnswered(index),
+        );
+      }
+    };
+
+    request.questions.forEach((question, index) => {
+      card.createEl('div', {
+        cls: 'ov-question-header',
+        text: question.header,
+      });
+      card.createEl('div', {
+        cls: 'ov-question-text',
+        text: question.question,
+      });
+
+      const optionsEl = card.createEl('div', { cls: 'ov-question-options' });
+      optionContainers.push(optionsEl);
+
+      let customEl: HTMLInputElement | null = null;
+      if (question.custom) {
+        customEl = card.createEl('input', {
+          cls: 'ov-question-custom',
+          attr: { type: 'text', placeholder: 'Type your own answer' },
+        });
+        customEl.addEventListener('input', () => {
+          customs[index] = customEl?.value ?? '';
+          if (!question.multiple && customs[index].trim()) {
+            selections[index].clear();
+          }
+          sync();
+        });
+      }
+
+      for (const option of question.options) {
+        const item = optionsEl.createEl('button', {
+          cls: 'ov-question-option',
+        });
+        item.dataset.label = option.label;
+        item.createEl('span', {
+          cls: 'ov-question-option-label',
+          text: option.label,
+        });
+        if (option.description) {
+          item.createEl('span', {
+            cls: 'ov-question-option-desc',
+            text: option.description,
+          });
+        }
+        item.addEventListener('click', () => {
+          if (question.multiple) {
+            if (selections[index].has(option.label)) {
+              selections[index].delete(option.label);
+            } else {
+              selections[index].add(option.label);
+            }
+          } else {
+            selections[index].clear();
+            selections[index].add(option.label);
+            if (customEl) customEl.value = '';
+            customs[index] = '';
+          }
+          sync();
+        });
+      }
+    });
+
+    const answer = async (): Promise<void> => {
+      if (!this.plugin.client) return;
+      const sessionId = this.plugin.session.sessionId;
+      if (!sessionId) return;
+      const answers = request.questions.map((question, index) => {
+        const values = [...selections[index]];
+        const custom = customs[index].trim();
+        if (question.custom && custom) values.push(custom);
+        return values;
+      });
+      if (answers.some((values) => values.length === 0)) return;
+      const result = await this.plugin.client.v2.session.question.reply({
+        sessionID: sessionId,
+        requestID: request.id,
+        questionV2Reply: { answers },
+      });
+      if (result.error) {
+        new Notice(
+          `OpenVault: ${errorText(result.error, 'question reply failed')}`,
+        );
+        return;
+      }
+      card.remove();
+      if (this.questionEl === card) this.questionEl = null;
+    };
+
+    const reject = async (): Promise<void> => {
+      if (!this.plugin.client) return;
+      const sessionId = this.plugin.session.sessionId;
+      if (!sessionId) return;
+      const result = await this.plugin.client.v2.session.question.reject({
+        sessionID: sessionId,
+        requestID: request.id,
+      });
+      if (result.error) {
+        new Notice(
+          `OpenVault: ${errorText(result.error, 'question reject failed')}`,
+        );
+        return;
+      }
+      card.remove();
+      if (this.questionEl === card) this.questionEl = null;
+    };
+
+    const actions = card.createEl('div', { cls: 'ov-question-actions' });
+    submit = actions.createEl('button', {
+      cls: 'ov-btn ov-btn--primary',
+      text: 'Send answer',
+    });
+    submit.disabled = true;
+    submit.addEventListener('click', () => void answer());
+    actions
+      .createEl('button', { cls: 'ov-btn', text: 'Skip' })
+      .addEventListener('click', () => void reject());
+
+    sync();
     this.scrollBottom(false);
   }
 

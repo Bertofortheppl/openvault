@@ -258,6 +258,87 @@
   font-style: italic;
 }
 
+/* ── Questions ────────────────────────────────────────────────────────────── */
+
+.ov-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: var(--radius-s);
+  background-color: var(--background-secondary);
+}
+
+.ov-question-header {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+}
+
+.ov-question-text {
+  font-size: var(--font-ui-small);
+  overflow-wrap: anywhere;
+}
+
+.ov-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ov-question-option {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  background-color: var(--background-primary);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.ov-question-option:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.ov-question-option.is-selected {
+  border-color: var(--interactive-accent);
+  background-color: var(--background-modifier-hover);
+}
+
+.ov-question-option-label {
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+.ov-question-option-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ov-question-custom {
+  width: 100%;
+  font-size: var(--font-ui-small);
+  padding: 5px 8px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  background-color: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.ov-question-custom:focus {
+  border-color: var(--interactive-accent);
+  outline: none;
+}
+
+.ov-question-actions {
+  display: flex;
+  gap: 6px;
+}
+
 /* ── Skill picker ─────────────────────────────────────────────────────────── */
 
 .ov-skill-menu {

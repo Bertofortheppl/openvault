@@ -13,16 +13,18 @@ function setup(sessionId = 'session-1') {
   const onText = vi.fn();
   const onStatus = vi.fn();
   const onPermission = vi.fn();
+  const onQuestion = vi.fn();
   const onSettled = vi.fn();
   const callbacks: TurnCallbacks = {
     onText,
     onStatus,
     onPermission,
+    onQuestion,
     onSettled,
   };
   const reducer = new TurnReducer(sessionId, callbacks);
   reducer.begin();
-  return { reducer, onText, onStatus, onPermission, onSettled };
+  return { reducer, onText, onStatus, onPermission, onQuestion, onSettled };
 }
 
 describe('TurnReducer', () => {
@@ -183,6 +185,73 @@ describe('TurnReducer', () => {
       error: undefined,
       aborted: true,
     });
+  });
+
+  it('surfaces questions and waits for an answer before settling', () => {
+    const { reducer, onQuestion, onSettled } = setup();
+    const question = {
+      question: 'Which file?',
+      header: 'Pick one',
+      options: [
+        { label: 'a.md', description: 'The first file' },
+        { label: 'b.md', description: 'The second file' },
+      ],
+    };
+
+    reducer.handle(
+      event('question.v2.asked', {
+        sessionID: 'session-1',
+        id: 'q-1',
+        questions: [question],
+      }),
+    );
+
+    expect(onQuestion).toHaveBeenCalledWith({
+      id: 'q-1',
+      questions: [question],
+    });
+
+    // Idle must not settle the turn while the model is waiting on an answer.
+    reducer.handle(event('session.idle', { sessionID: 'session-1' }));
+    expect(onSettled).not.toHaveBeenCalled();
+
+    reducer.handle(
+      event('question.v2.replied', {
+        sessionID: 'session-1',
+        requestID: 'q-1',
+        answers: [['a.md']],
+      }),
+    );
+    reducer.handle(event('session.idle', { sessionID: 'session-1' }));
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles after a question is rejected', () => {
+    const { reducer, onSettled } = setup();
+
+    reducer.handle(
+      event('question.v2.asked', {
+        sessionID: 'session-1',
+        id: 'q-1',
+        questions: [
+          {
+            question: 'Continue?',
+            header: 'Confirm',
+            options: [{ label: 'Yes', description: '' }],
+          },
+        ],
+      }),
+    );
+    reducer.handle(
+      event('question.v2.rejected', {
+        sessionID: 'session-1',
+        requestID: 'q-1',
+      }),
+    );
+    reducer.handle(event('session.idle', { sessionID: 'session-1' }));
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
   it('reports tool status and permissions', () => {
