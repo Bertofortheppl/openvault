@@ -1,7 +1,7 @@
 {
   "id": "openvault",
   "name": "OpenVault",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
   "description": "Chat with opencode from your Obsidian sidebar",
   "author": "berto",

@@ -1,6 +1,6 @@
 {
   "name": "openvault",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenCode as an Obsidian sidebar AI collaborator",
   "main": "main.js",
   "scripts": {
