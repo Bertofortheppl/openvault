@@ -74,4 +74,4 @@ Then toggle OpenVault off and on in Obsidian.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
