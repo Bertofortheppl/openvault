@@ -20,7 +20,7 @@ export default class OpenVaultPlugin extends Plugin {
   session!: ChatSession;
   client: OpencodeClient | null = null;
   status: ServerStatus = { state: 'stopped' };
-  server = new OpenCodeServer();
+  server!: OpenCodeServer;
 
   private eventAbort: AbortController | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -35,6 +35,8 @@ export default class OpenVaultPlugin extends Plugin {
 
   override async onload(): Promise<void> {
     await this.loadSettings();
+    this.server = new OpenCodeServer(this.vaultPath);
+    await this.server.cleanupStale();
     this.session = new ChatSession(null, this.vaultPath);
     this.session.sessionId = this.storedSessionId;
 
@@ -42,6 +44,16 @@ export default class OpenVaultPlugin extends Plugin {
       this.status = status;
       this.refreshViews();
     });
+
+    this.registerEvent(
+      this.app.workspace.on('quit', () => this.server.killNow()),
+    );
+    this.registerDomEvent(window, 'beforeunload', () =>
+      this.server.killNow(),
+    );
+    const onExit = (): void => this.server.killNow();
+    process.on('exit', onExit);
+    this.register(() => process.off('exit', onExit));
 
     this.registerView(
       VIEW_TYPE,
@@ -72,7 +84,7 @@ export default class OpenVaultPlugin extends Plugin {
 
   override onunload(): void {
     this.disposeEvents();
-    this.server.stop();
+    this.server?.killNow();
   }
 
   async openView(): Promise<void> {
@@ -113,11 +125,13 @@ export default class OpenVaultPlugin extends Plugin {
     try {
       await this.server.start(this.settings.opencodePath, this.vaultPath);
     } catch (error) {
+      if (this.server.closed) return;
       new Notice(
         `OpenVault: ${error instanceof Error ? error.message : String(error)}`,
       );
       return;
     }
+    if (this.server.closed) return;
 
     const client = createClient(this.server.baseUrl);
     this.client = client;
